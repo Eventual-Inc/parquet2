@@ -109,7 +109,8 @@ pub fn int96_to_i64_ns(value: [u32; 3]) -> i64 {
     let nanoseconds = ((value[1] as i64) << 32) + value[0] as i64;
     let seconds = (day - JULIAN_DAY_OF_EPOCH) * SECONDS_PER_DAY;
 
-    seconds * NANOS_PER_SECOND + nanoseconds
+    let converted_nanos = i64::checked_mul(seconds, NANOS_PER_SECOND).expect("Overflow encountered when reading int96 as int64 nanosecond timestamp");
+    i64::checked_add(converted_nanos, nanoseconds).expect("Overflow encountered when reading int96 as int64 nanosecond timestamp")
 }
 
 /// Returns the ordering of two binary values.
