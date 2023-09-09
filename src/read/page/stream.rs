@@ -51,6 +51,26 @@ pub async fn get_page_stream_from_column_start<'a, R: AsyncRead + Unpin + Send>(
     ))
 }
 
+
+pub async fn get_owned_page_stream_from_column_start<'a, R: AsyncRead + Unpin + Send>(
+    column_metadata: ColumnChunkMetaData,
+    reader: R,
+    scratch: Vec<u8>,
+    pages_filter: PageFilter,
+    max_header_size: usize,
+) -> Result<impl Stream<Item = Result<CompressedPage>>> {
+    let page_metadata: PageMetaData = (&column_metadata).into();
+    Ok(_get_owned_page_stream(
+        reader,
+        page_metadata.num_values,
+        page_metadata.compression,
+        page_metadata.descriptor,
+        scratch,
+        pages_filter,
+        max_header_size,
+    ))
+}
+
 /// Returns a stream of compressed data pages with [`PageMetaData`]
 pub async fn get_page_stream_with_page_meta<RR: AsyncRead + Unpin + Send + AsyncSeek>(
     page_metadata: PageMetaData,
@@ -108,6 +128,63 @@ fn _get_page_stream<R: AsyncRead + Unpin + Send>(
             scratch.clear();
             scratch.try_reserve(read_size)?;
             let bytes_read = reader
+                .take(read_size as u64)
+                .read_to_end(&mut scratch).await?;
+
+            if bytes_read != read_size {
+                Err(Error::oos(
+                    "The page header reported the wrong page size".to_string(),
+                ))?
+            }
+
+            yield finish_page(
+                page_header,
+                &mut scratch,
+                compression,
+                &descriptor,
+                None,
+            )?;
+        }
+    }
+}
+
+fn _get_owned_page_stream<R: AsyncRead + Unpin + Send>(
+    mut reader: R,
+    total_num_values: i64,
+    compression: Compression,
+    descriptor: Descriptor,
+    mut scratch: Vec<u8>,
+    pages_filter: PageFilter,
+    max_page_size: usize,
+) -> impl Stream<Item = Result<CompressedPage>> {
+    let mut seen_values = 0i64;
+    try_stream! {
+        let reader_ref = &mut reader;
+        while seen_values < total_num_values {
+            // the header
+            let page_header = read_page_header(reader_ref, max_page_size).await?;
+
+            let data_header = get_page_header(&page_header)?;
+            seen_values += data_header.as_ref().map(|x| x.num_values() as i64).unwrap_or_default();
+
+            let read_size: usize = page_header.compressed_page_size.try_into()?;
+
+            if let Some(data_header) = data_header {
+                if !pages_filter(&descriptor, &data_header) {
+                    // page to be skipped, we sill need to seek
+                    copy(reader_ref.take(read_size as u64), &mut sink()).await?;
+                    continue
+                }
+            }
+
+            if read_size > max_page_size {
+                Err(Error::WouldOverAllocate)?
+            }
+
+            // followed by the buffer
+            scratch.clear();
+            scratch.try_reserve(read_size)?;
+            let bytes_read = reader_ref
                 .take(read_size as u64)
                 .read_to_end(&mut scratch).await?;
 
