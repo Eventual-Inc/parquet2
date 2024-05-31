@@ -2,13 +2,66 @@ use crate::{error::Error, metadata::get_sort_order};
 
 use super::{column_order::ColumnOrder, schema_descriptor::SchemaDescriptor, RowGroupMetaData};
 use parquet_format_safe::ColumnOrder as TColumnOrder;
+#[cfg(feature = "serde_types")]
+use serde::{Deserialize, Serialize};
 
 pub use crate::thrift_format::KeyValue;
+
+#[cfg(feature = "serde_types")]
+pub mod key_value_serde {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct SerializableKeyValue {
+        key: String,
+        value: Option<String>,
+    }
+    
+    impl From<KeyValue> for SerializableKeyValue {
+        fn from(kv: KeyValue) -> Self {
+            SerializableKeyValue {
+                key: kv.key,
+                value: kv.value,
+            }
+        }
+    }
+    impl From<SerializableKeyValue> for KeyValue {
+        fn from(kv: SerializableKeyValue) -> Self {
+            KeyValue {
+                key: kv.key,
+                value: kv.value,
+            }
+        }
+    }
+
+    #[allow(unused)]
+    pub fn serialize<S>(data: &Option<Vec<KeyValue>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let data: Option<Vec<SerializableKeyValue>> = data
+            .as_ref()
+            .map(|data| data.iter().map(|kv| kv.clone().into()).collect());
+        match data {
+            Some(data) => data.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<KeyValue>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data: Option<Vec<SerializableKeyValue>> = Option::deserialize(deserializer)?;
+        let data = data.map(|data| data.into_iter().map(|kv| kv.into()).collect());
+        Ok(data)
+    }
+}
 
 /// Metadata for a Parquet file.
 // This is almost equal to [`parquet_format_safe::FileMetaData`] but contains the descriptors,
 // which are crucial to deserialize pages.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde_types", derive(Deserialize, Serialize))]
 pub struct FileMetaData {
     /// version of this file.
     pub version: i32,
@@ -26,6 +79,7 @@ pub struct FileMetaData {
     /// The row groups of this file
     pub row_groups: Vec<RowGroupMetaData>,
     /// key_value_metadata of this file.
+    #[cfg_attr(feature = "serde_types", serde(with = "key_value_serde"))]
     pub key_value_metadata: Option<Vec<KeyValue>>,
     /// schema descriptor.
     pub schema_descr: SchemaDescriptor,
